@@ -3,7 +3,7 @@ import streamlit as st
 import tempfile
 import os
 
-from rag.ingestion import load_and_chunk_pdf
+from rag.ingestion import load_and_chunk_file
 from rag.embeddings import embed_chunks, embed_query
 from rag.vectorstore import store_chunks, clear_collection, get_collection_count
 from rag.retriever import retrieve_similar_chunks
@@ -16,116 +16,158 @@ st.set_page_config(
 )
 
 st.title("📄 RAG Document Assistant")
-st.caption("Upload a PDF and ask questions — powered by Claude")
+st.caption("Upload documents and ask questions — powered by Claude")
 
-if "pdf_processed" not in st.session_state:
-    st.session_state.pdf_processed = False
+# ── Session state ─────────────────────────────────────────
+if "uploaded_docs" not in st.session_state:
+    st.session_state.uploaded_docs = {}   # {filename: chunk_count}
 
-if "current_pdf" not in st.session_state:
-    st.session_state.current_pdf = None
+if "active_doc" not in st.session_state:
+    st.session_state.active_doc = None
 
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+    st.session_state.chat_history = []    # full conversation history
 
+# ── Sidebar ───────────────────────────────────────────────
 with st.sidebar:
-    st.header("Upload Document")
-    st.markdown("Supported format: **PDF**")
+    st.header("Documents")
+    st.markdown("Supported: **PDF, TXT, DOCX**")
 
     uploaded_file = st.file_uploader(
-        label="Choose a PDF file",
-        type=["pdf"],
-        help="Upload the PDF you want to ask questions about"
+        label="Upload a document",
+        type=["pdf", "txt", "docx"],
+        help="Upload PDF, TXT or DOCX files"
     )
 
     if uploaded_file is not None:
-        if st.session_state.current_pdf != uploaded_file.name:
-            if st.button("Process PDF", type="primary", use_container_width=True):
-                with st.spinner("Reading and indexing PDF..."):
+        if uploaded_file.name not in st.session_state.uploaded_docs:
+            if st.button("Process File", type="primary", use_container_width=True):
+                with st.spinner(f"Processing {uploaded_file.name}..."):
                     try:
                         with tempfile.NamedTemporaryFile(
-                            delete=False, suffix=".pdf"
+                            delete=False,
+                            suffix=f".{uploaded_file.name.split('.')[-1]}"
                         ) as tmp:
                             tmp.write(uploaded_file.read())
                             tmp_path = tmp.name
 
-                        # Step 1 — Extract text and chunk with page metadata
-                        chunks, metadatas = load_and_chunk_pdf(tmp_path)
+                        # Extract + chunk (auto-detects file type)
+                        chunks, metadatas = load_and_chunk_file(
+                            tmp_path, uploaded_file.name
+                        )
 
-                        # Step 2 — Embed chunks into vectors
+                        # Embed
                         vectors = embed_chunks(chunks)
 
-                        # Step 3 — Clear old data, store new vectors
-                        clear_collection()
-                        store_chunks(chunks, vectors, uploaded_file.name, metadatas)
+                        # Store — each doc gets its own chunks in ChromaDB
+                        # We DON'T clear — we ADD to existing collection
+                        store_chunks(
+                            chunks, vectors,
+                            uploaded_file.name, metadatas
+                        )
 
                         os.unlink(tmp_path)
 
-                        st.session_state.pdf_processed = True
-                        st.session_state.current_pdf = uploaded_file.name
+                        # Track uploaded docs
+                        st.session_state.uploaded_docs[uploaded_file.name] = len(chunks)
+                        st.session_state.active_doc = uploaded_file.name
                         st.session_state.chat_history = []
 
                         st.success(f"Indexed {len(chunks)} chunks!")
+                        st.rerun()
 
                     except Exception as e:
-                        st.error(f"Error processing PDF: {str(e)}")
+                        st.error(f"Error: {str(e)}")
         else:
-            st.success(f"Ready — {get_collection_count()} chunks indexed")
+            st.info(f"Already indexed!")
 
-    if st.session_state.pdf_processed:
+    # ── Document selector ─────────────────────────────────
+    if st.session_state.uploaded_docs:
         st.divider()
-        st.markdown(f"**Current doc:**")
-        st.markdown(f"`{st.session_state.current_pdf}`")
+        st.markdown("**Indexed documents:**")
 
-        if st.button("Clear & Upload New", use_container_width=True):
+        for doc_name, chunk_count in st.session_state.uploaded_docs.items():
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                if st.button(
+                    f"📄 {doc_name[:25]}",
+                    use_container_width=True,
+                    type="primary" if doc_name == st.session_state.active_doc else "secondary"
+                ):
+                    st.session_state.active_doc = doc_name
+                    st.session_state.chat_history = []
+                    st.rerun()
+            with col2:
+                st.caption(f"{chunk_count}c")
+
+        st.divider()
+        if st.button("Clear all docs", use_container_width=True):
             clear_collection()
-            st.session_state.pdf_processed = False
-            st.session_state.current_pdf = None
+            st.session_state.uploaded_docs = {}
+            st.session_state.active_doc = None
             st.session_state.chat_history = []
             st.rerun()
 
-if not st.session_state.pdf_processed:
-    st.info("Upload a PDF from the sidebar to get started.")
-
+# ── Main chat area ────────────────────────────────────────
+if not st.session_state.uploaded_docs:
+    st.info("Upload a document from the sidebar to get started.")
     with st.expander("How it works"):
         st.markdown("""
-        1. **Upload** a PDF using the sidebar
+        1. **Upload** a PDF, TXT or DOCX from the sidebar
         2. **Wait** for it to be processed and indexed
         3. **Ask** any question about the document
-        4. **Get** answers grounded in your document with page numbers
+        4. **Get** answers with page numbers and sources
+        5. **Upload more** documents and switch between them
         """)
-else:
-    st.markdown(f"### Ask about `{st.session_state.current_pdf}`")
 
+else:
+    active = st.session_state.active_doc
+    st.markdown(f"### Chatting about `{active}`")
+    st.caption(f"{st.session_state.uploaded_docs.get(active, 0)} chunks indexed — "
+               f"{len(st.session_state.chat_history)//2} questions asked")
+
+    # Display chat history
     for message in st.session_state.chat_history:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
+    # Chat input
     question = st.chat_input("Ask a question about your document...")
 
     if question:
         with st.chat_message("user"):
             st.markdown(question)
 
+        # Build history to send to Claude (exclude current question)
+        history_for_claude = [
+            {"role": m["role"], "content": m["content"]}
+            for m in st.session_state.chat_history
+        ]
+
+        # Add to session history
         st.session_state.chat_history.append({
             "role": "user",
             "content": question
         })
 
         with st.chat_message("assistant"):
-            with st.spinner("Searching document and generating answer..."):
+            with st.spinner("Searching and generating answer..."):
                 try:
-                    # Step 1 — Embed the question
+                    # Embed query
                     query_vector = embed_query(question)
 
-                    # Step 2 — Retrieve relevant chunks with metadata
-                    chunks = retrieve_similar_chunks(query_vector)
+                    # Retrieve chunks — filter by active doc
+                    chunks = retrieve_similar_chunks(
+                        query_vector,
+                        source_filter=active
+                    )
 
-                    # Step 3 — Ask Claude with context
-                    answer = ask_claude(question, chunks)
+                    # Ask Claude with context + chat history
+                    answer = ask_claude(question, chunks, history_for_claude)
 
                     st.markdown(answer)
 
-                    # Show sources with page numbers
+                    # Sources panel
                     with st.expander("View sources"):
                         for i, chunk in enumerate(chunks):
                             col1, col2 = st.columns([1, 4])

@@ -4,22 +4,24 @@ from config.constants import TOP_K_RESULTS
 
 
 def retrieve_similar_chunks(query_vector: list[float],
-                            top_k: int = TOP_K_RESULTS) -> list[dict]:
+                            top_k: int = TOP_K_RESULTS,
+                            source_filter: str = None) -> list[dict]:
     """
-    Returns list of dicts with text + page + source:
-    [
-        {"text": "...", "page": 3, "source": "doc.pdf"},
-        ...
-    ]
+    Retrieves top-k chunks. If source_filter is given,
+    only returns chunks from that specific document.
     """
     collection = get_collection()
 
     if collection.count() == 0:
-        raise ValueError("No documents in vector store. Upload a PDF first.")
+        raise ValueError("No documents in vector store. Upload a file first.")
+
+    # Build where filter for specific document
+    where = {"source": source_filter} if source_filter else None
 
     results = collection.query(
         query_embeddings=[query_vector],
         n_results=top_k,
+        where=where,
         include=["documents", "metadatas", "distances"]
     )
 
@@ -36,8 +38,6 @@ def retrieve_similar_chunks(query_vector: list[float],
             "score": round(1 - dist, 3)
         })
 
-    print(f"[retriever] Retrieved {len(enriched)} chunks")
-    for i, r in enumerate(enriched):
-        print(f"  [{i+1}] page={r['page']} score={r['score']} | {r['text'][:60]}...")
-
+    print(f"[retriever] Retrieved {len(enriched)} chunks "
+          f"from '{source_filter}'")
     return enriched
